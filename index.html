@@ -298,22 +298,12 @@ function plantTree(m = 25) {
   loadBoard("plant", { minutes: m });
 }
 
-/* ---------- تنبيهات الموبايل (تيليجرام) ---------- */
+/* ---------- تنبيهات الموبايل (Web Push) ---------- */
 const NOTIFY_URL = AI_URL.replace("quick-service", "notify");
 let notif = null, notifAt = 0, notifBusy = false;
 async function notifCall(body) {
-  const r = await fetch(NOTIFY_URL, { 
-    method: "POST", 
-    headers: { 
-      "Content-Type": "application/json",
-      "apikey": AI_KEY,
-      "Authorization": "Bearer " + AI_KEY
-    }, 
-    body: JSON.stringify({ pid: getPid(), tz: Intl.DateTimeFormat().resolvedOptions().timeZone, ...body }) 
-  });
-  const j = await r.json().catch(() => ({})); 
-  if (!r.ok) throw new Error(j.error || r.status); 
-  return j;
+  const r = await fetch(NOTIFY_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pid: getPid(), tz: Intl.DateTimeFormat().resolvedOptions().timeZone, ...body }) });
+  const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || r.status); return j;
 }
 async function syncNotif() {
   notifBusy = true;
@@ -324,22 +314,40 @@ async function syncNotif() {
   } catch (e) { notif = { error: e.message }; }
   notifBusy = false; notifAt = Date.now(); if (tab === "account") render();
 }
+const keyBytes = k => Uint8Array.from(atob((k + "=".repeat((4 - k.length % 4) % 4)).replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0));
+const pushReady = () => /^https?:/.test(location.protocol) && window.isSecureContext && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+async function enablePush() {
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    if ((await Notification.requestPermission()) !== "granted") { toast("لازم تسمح بالإشعارات من المتصفح"); return; }
+    const { key } = await notifCall({ action: "vapid" });
+    const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(key) });
+    await notifCall({ action: "push_subscribe", sub: sub.toJSON() });
+    S.notifOn = true; store.save(S); await syncNotif(); toast("الإشعارات اتفعّلت ✅");
+  } catch (e) { toast("تعذر التفعيل: " + e.message); }
+}
+async function disablePush() {
+  try { const reg = await navigator.serviceWorker.ready, sub = await reg.pushManager.getSubscription();
+    if (sub) { await notifCall({ action: "push_unsubscribe", endpoint: sub.endpoint }); await sub.unsubscribe(); } } catch (e) {}
+  S.notifOn = false; store.save(S); render();
+}
+async function testPush() {
+  try { const r = await notifCall({ action: "test" }); toast(r.ok ? "اتبعت تنبيه تجريبي، هيوصلك خلال ثواني" : "الإرسال فشل (" + r.statuses.join(",") + ")"); }
+  catch (e) { toast(e.message === "not_subscribed" ? "فعّل الإشعارات الأول" : "تعذر الإرسال"); }
+}
 function notifCard() {
-  if (S.notifOn && !notifBusy && Date.now() - notifAt > 20000) syncNotif();
-  const n = notif, link = n && n.bot ? "https://t.me/" + n.bot + "?start=" + n.code : null;
+  const on = S.notifOn && "Notification" in window && Notification.permission === "granted";
+  if (on && !notifBusy && Date.now() - notifAt > 20000) syncNotif();
   return h("div", { class: "card" }, h("h3", {}, "تنبيهات الموبايل 📲"),
-    h("p", { class: "muted" }, "بتوصلك رسالة على تيليجرام قبل المحاضرة بنص ساعة، وقبل الامتحان بـ3 أيام ويوم وفي يومه، وتذكير بالمذاكرة بالليل لو امتحانك قرب."),
-    !S.notifOn ? h("button", { onclick: () => { S.notifOn = true; store.save(S); syncNotif(); render(); } }, "فعّل التنبيهات")
-    : !n ? h("p", { class: "muted" }, "بجهّز الربط...")
-    : n.error === "bot_not_configured" ? h("p", { class: "muted" }, "البوت لسه مش متظبط على السيرفر (محتاج TELEGRAM_BOT_TOKEN).")
-    : n.error ? h("p", { class: "muted" }, "حصلت مشكلة (" + n.error + "). جرّب تاني بعد شوية.")
-    : n.linked ? h("div", {}, h("p", {}, "✅ الموبايل متربط، والتنبيهات شغالة."),
-        h("div", { class: "inl" },
-          h("button", { class: "ghost sm", onclick: async () => { try { await notifCall({ action: "test" }); toast("اتبعت تنبيه تجريبي"); } catch (e) { toast("تعذر الإرسال"); } } }, "ابعت تنبيه تجريبي"),
-          h("button", { class: "ghost sm", onclick: () => { S.notifOn = false; store.save(S); render(); } }, "إيقاف")))
-    : h("div", {}, h("p", {}, "خطوة أخيرة: دوس على الزرار، وفي تيليجرام دوس Start."),
-        h("a", { href: link, target: "_blank", rel: "noopener" }, h("button", { type: "button" }, "اربط تيليجرام")),
-        h("p", { class: "muted" }, "الربط بياخد أقل من دقيقة، وهتتأكد بنفسك لما الصفحة دي تتحدّث.")));
+    h("p", { class: "muted" }, "إشعارات من الموقع نفسه قبل المحاضرة بنص ساعة، وقبل الامتحان بـ3 أيام ويوم وفي يومه، وتذكير بالمذاكرة بالليل لو امتحانك قرب."),
+    !/^https?:/.test(location.protocol) ? h("p", { class: "muted" }, "⚠️ الإشعارات بتشتغل بس لما تفتح الموقع من رابط (زي Netlify) مش من ملف على الجهاز.")
+    : isIOS && !navigator.standalone ? h("p", { class: "muted" }, "على الآيفون: افتح الموقع في Safari، دوس زرار المشاركة ثم Add to Home Screen، وافتحه من الأيقونة وبعدها فعّل الإشعارات.")
+    : !pushReady() ? h("p", { class: "muted" }, "المتصفح ده مش بيدعم الإشعارات. جرّب Chrome على الأندرويد.")
+    : Notification.permission === "denied" ? h("p", { class: "muted" }, "الإشعارات متقفولة لهذا الموقع. افتح إعدادات الموقع في المتصفح واسمح بالإشعارات.")
+    : !on ? h("button", { onclick: enablePush }, "فعّل الإشعارات")
+    : h("div", {}, h("p", {}, "✅ الإشعارات شغّالة على الجهاز ده."),
+        h("div", { class: "inl" }, h("button", { class: "ghost sm", onclick: testPush }, "ابعت تنبيه تجريبي"), h("button", { class: "ghost sm", onclick: disablePush }, "إيقاف"))));
 }
 
 let sel = "global";
